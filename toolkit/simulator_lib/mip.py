@@ -7,9 +7,10 @@ import json
 
 
 def _guess_url_is_file(url):
+
     # 1. URL path contains a filename-like pattern
-    path = Path(urlparse(url).path)
-    if "." in path.name:
+    url_content = Path(urlparse(url).path).name
+    if "." in url_content:
         return True
 
     # 2. HEAD request content-type
@@ -19,7 +20,7 @@ def _guess_url_is_file(url):
             if not ctype.startswith("text/html"):
                 return True
     except Exception as e:
-        if "404" in str(e):
+        if "404" in str(e) or "400" in str(e):
             return False
 
     # 4. GET small chunk and detect HTML
@@ -66,49 +67,31 @@ def _github_to_url(ref, branch="master"):
             To: https://raw.githubusercontent.com/peterhinch/micropython-mqtt/refs/heads/master/XXX
         """
         base_github_url = "https://raw.githubusercontent.com"
+        _parts = ref.split("/")
+        user = _parts[0].split(":")[-1]
+        repo = _parts[1]
+        file_path = "/".join(_parts[2:])
         branch = f"refs/heads/{branch}"
-        # Remove mip prefix
-        path = ref[len("github:"):]
-        # Build subpath from path and branch name
-        file_subpath = f"{path.split("/")[-2]}/{path.split("/")[-1]}"
-        if "." in file_subpath:
+        if "." in file_path:
             # File mode - Build raw URL
-            path = path.replace(file_subpath, "")
-            ref = f"{base_github_url}/{path}/{branch}/{file_subpath}"
+            ref = f"{base_github_url}/{user}/{repo}/{branch}/{file_path}"
         else:
             # Folder mode - Build raw URL
-            ref = f"{base_github_url}/{path}/{branch}"
+            ref = f"{base_github_url}/{user}/{repo}/{branch}/{file_path}"
         return ref
     return None
 
 
-def _mip_emu(ref, target=None):
+def _mip_emu(ref, target:Path=Path("lib"), version:str="master"):
     """
-    [BETA]
     Tiny simulation of MicroPython's mip.install for normal Python.
-
-    - ref:
-        * URL (http/https): downloads file to `target`
-        * local path (file or directory): copies to `target`
-    - target:
-        * destination directory (defaults to ./lib)
-    - verbose:
-        * if True, prints actions
-
-    Returns: list of installed/downloaded Path objects.
     """
-    # Default target like /lib in MicroPython
-    if target is None:
-        target = Path("lib")
-    else:
-        target = Path(target)
-
     installed = []
 
-    # --- Case 1: URL ---------------------------------------------------------
     if isinstance(ref, str) and (ref.startswith("http") or ref.startswith("github")):
+
         if ref.startswith("github"):
-            url = _github_to_url(ref)
+            url = _github_to_url(ref, branch=version)
             if url is None:
                 console(f"Invalid GitHub URL: {ref}")
                 return []
@@ -117,10 +100,12 @@ def _mip_emu(ref, target=None):
         dest = target / Path(urlparse(url).path).name
 
         if not _guess_url_is_file(url):
+            # Folder mode, redirect to package.json
             url = f"{url.rstrip('/')}/package.json"
             dest = target / Path(urlparse(url).path).name
             console(f"Patch url (dir) to point to package.json: {url}")
         try:
+            # File mode
             print(f"🔻 Downloading {url} to {dest}", end="")
             data = _url_file_content(url)
             print(f" ({len(data)} bytes)")
@@ -129,12 +114,13 @@ def _mip_emu(ref, target=None):
             return []
 
         if url.endswith("package.json"):
+            # Install based on package.json content
             package_json_data = json.loads(data)
             package_urls = package_json_data.get("urls", [])
             for file_url in package_urls:
                 pack_source_file = file_url[1]
                 if pack_source_file.startswith("github"):
-                    pack_source_file = _github_to_url(pack_source_file)
+                    pack_source_file = _github_to_url(pack_source_file, branch=version)
                 pack_dest_file = Path(file_url[0])
                 pack_dest_dir = target / pack_dest_file.parent
                 pack_dest_dir.mkdir(parents=True, exist_ok=True)
@@ -146,6 +132,7 @@ def _mip_emu(ref, target=None):
                         installed.append(pack_dest_dir.name)
         else:
             if data:
+                # Install based on file content - save url body to file
                 if _save_file(dest, data):
                     installed.append(dest.name)
     return installed
@@ -159,15 +146,16 @@ def _dump_dir_content(target):
         if item.is_dir():
             for subitem in item.iterdir():
                 print(f"   {str(subitem).replace(base_path, '')}")
-            print("")
+        print("")
 
 
 def install(ref, **kwargs):
     target = kwargs.get("target", Path.cwd() / "lib")
+    version = kwargs.get("version", "master")
     console(f">>> mip install: {ref} {kwargs}")
     if isinstance(target, str):
         target = Path(target)
     # Run mip emulation
-    _mip_emu(ref, target=target)
+    _mip_emu(ref, target=target, version=version)
     # Dump content
     _dump_dir_content(target)
